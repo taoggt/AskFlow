@@ -1,0 +1,78 @@
+# ===== 构建产物 =====
+target/
+build/
+dist/
+*.class
+*.war
+.flattened-pom.xml
+*.tsbuildinfo
+
+# ===== Maven Wrapper =====
+# 注意：.mvn/wrapper/maven-wrapper.properties 需要随仓库提交
+# 本仓库 wrapper 为 distributionType=only-script，不依赖 maven-wrapper.jar
+
+# ===== IDE / 编辑器 =====
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+# 用 .idea/* 而不是 .idea，否则下面的 ! 例外规则会失效（父目录被排除后 Git 不会再进入）
+.idea/*
+!.idea/icon.png
+!.idea/dictionaries/
+!.idea/inspectionProfiles/
+!.idea/scopes/
+*.iws
+*.iml
+*.ipr
+
+### VS Code ###
+.vscode/
+
+# ===== NetBeans =====
+/nbproject/private/
+/nbbuild/
+/nbdist/
+/.nb-gradle/
+
+# ===== 前端 =====
+node_modules/
+.vite/
+.pnpm-store/
+.turbo/
+coverage/
+# tsc -b 由 vite.config.ts 生成的产物
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.env*.local
+
+# ===== 本地配置 / 运行时 =====
+# 本地敏感配置（DB、Redis 密码、各模型平台 API Key），说明见 bootstrap/src/main/resources/application.yaml
+application-local.yaml
+application-*-local.yaml
+/temp/
+/logs/
+scripts/logs/
+*.log
+hs_err_pid*
+replay_pid*
+.claude/settings.local.json
+.workbuddy/
+
+# ===== 部署产物 =====
+deploy/*.tar.gz
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 其他文件 =====
+/docs/
+/interview-prep/
