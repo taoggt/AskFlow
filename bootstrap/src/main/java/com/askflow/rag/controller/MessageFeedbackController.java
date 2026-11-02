@@ -22,6 +22,7 @@ import com.askflow.framework.convention.Result;
 import com.askflow.framework.web.Results;
 import com.askflow.rag.service.MessageFeedbackService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -32,6 +33,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "feedback.controller.enable", havingValue = "true")
 public class MessageFeedbackController {
 
     private final MessageFeedbackService feedbackService;

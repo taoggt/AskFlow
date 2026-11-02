@@ -91,12 +91,7 @@ export const MessageItem = React.memo(function MessageItem({ message, isLast }: 
             <p className="text-xs text-rose-500">生成已中断。</p>
           ) : null}
           {showFeedback ? (
-            <FeedbackButtons
-              messageId={message.id}
-              feedback={message.feedback ?? null}
-              content={message.content}
-              alwaysVisible={Boolean(isLast)}
-            />
+            <FeedbackButtons content={message.content} alwaysVisible={Boolean(isLast)} />
           ) : null}
         </div>
       </div>

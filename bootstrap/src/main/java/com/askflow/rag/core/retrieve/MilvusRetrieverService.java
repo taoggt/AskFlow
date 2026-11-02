@@ -20,7 +20,6 @@ package com.askflow.rag.core.retrieve;
 import cn.hutool.core.util.StrUtil;
 import com.askflow.rag.config.RAGDefaultProperties;
 import com.askflow.framework.convention.RetrievedChunk;
-import com.askflow.infra.embedding.EmbeddingService;
 import io.milvus.v2.client.MilvusClientV2;
 import io.milvus.v2.service.vector.request.SearchReq;
 import io.milvus.v2.service.vector.request.data.BaseVector;
@@ -43,13 +42,14 @@ import java.util.stream.Collectors;
 @ConditionalOnProperty(name = "rag.vector.type", havingValue = "milvus", matchIfMissing = true)
 public class MilvusRetrieverService implements RetrieverService {
 
-    private final EmbeddingService embeddingService;
+    private final QueryEmbeddingService queryEmbeddingService;
     private final MilvusClientV2 milvusClient;
     private final RAGDefaultProperties ragDefaultProperties;
 
     @Override
     public List<RetrievedChunk> retrieve(RetrieveRequest retrieveParam) {
-        List<Float> emb = embeddingService.embed(retrieveParam.getQuery());
+        // 按 collection 反查知识库绑定的嵌入模型，确保查询向量与入库向量同源
+        List<Float> emb = queryEmbeddingService.embed(retrieveParam.getQuery(), retrieveParam.getCollectionName());
         float[] vec = toArray(emb);
 
         float[] norm = normalize(vec);

@@ -71,7 +71,9 @@ public class ChunkerNode implements IngestionNode {
         List<VectorChunk> chunks = convertToVectorChunks(results);
 
         // 嵌入：为切分后的文本块生成向量
-        chunkEmbeddingService.embed(chunks, null);
+        // 模型由知识库绑定（经 IngestionContext 传入），保证与检索阶段的查询向量同源；
+        // 独立数据通道任务没有知识库上下文，为空时 ChunkEmbeddingService 会走全局默认模型
+        chunkEmbeddingService.embed(chunks, context.getEmbeddingModel());
 
         context.setChunks(chunks);
         return NodeResult.ok("已分块 " + chunks.size() + " 段");

@@ -364,6 +364,8 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                 .vectorSpaceId(VectorSpaceId.builder()
                         .logicalName(kbDO.getCollectionName())
                         .build())
+                // 与 chunk 模式保持一致：向量必须用知识库绑定的模型生成，否则同一集合内向量不同源
+                .embeddingModel(kbDO.getEmbeddingModel())
                 .skipIndexerWrite(true)
                 .build();
 

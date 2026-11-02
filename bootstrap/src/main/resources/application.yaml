@@ -61,6 +61,11 @@ rag:
   query-rewrite:
     enabled: true
 
+  # 知识库 collection -> 嵌入模型 的映射缓存，用于检索阶段按知识库选择模型
+  # 单位毫秒，<=0 表示不缓存（每次检索都查库）
+  embedding-profile:
+    cache-ttl-ms: 30000
+
   rerank:
     enabled: true
 

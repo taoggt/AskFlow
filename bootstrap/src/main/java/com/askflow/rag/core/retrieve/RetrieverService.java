@@ -52,6 +52,10 @@ public interface RetrieverService {
      * - 然后在向量库中执行相似度搜索
      * - 返回命中文档 Chunk 的列表，已按相似度倒序排序
      * <p>
+     * 注意：本方法不携带 collectionName，无法反查知识库绑定的嵌入模型，只能使用全局默认模型，
+     * 因此仅适用于无知识库上下文的场景（如连通性测试）；知识库检索请使用
+     * {@link #retrieve(RetrieveRequest)} 并显式传入 collectionName。
+     * <p>
      * 示例：
      * retrieve("请介绍入职流程", 3)
      *

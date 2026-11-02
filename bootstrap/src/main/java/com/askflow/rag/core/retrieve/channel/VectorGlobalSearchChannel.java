@@ -18,21 +18,17 @@
 package com.askflow.rag.core.retrieve.channel;
 
 import cn.hutool.core.collection.CollUtil;
-import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.askflow.framework.convention.RetrievedChunk;
-import com.askflow.knowledge.dao.entity.KnowledgeBaseDO;
-import com.askflow.knowledge.dao.mapper.KnowledgeBaseMapper;
 import com.askflow.rag.config.SearchChannelProperties;
 import com.askflow.rag.core.intent.NodeScore;
+import com.askflow.rag.core.retrieve.KbEmbeddingProfileProvider;
 import com.askflow.rag.core.retrieve.RetrieverService;
 import com.askflow.rag.core.retrieve.channel.strategy.CollectionParallelRetriever;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.Executor;
 
 /**
@@ -43,15 +39,15 @@ import java.util.concurrent.Executor;
 public class VectorGlobalSearchChannel implements SearchChannel {
 
     private final SearchChannelProperties properties;
-    private final KnowledgeBaseMapper knowledgeBaseMapper;
+    private final KbEmbeddingProfileProvider embeddingProfileProvider;
     private final CollectionParallelRetriever parallelRetriever;
 
     public VectorGlobalSearchChannel(RetrieverService retrieverService,
                                      SearchChannelProperties properties,
-                                     KnowledgeBaseMapper knowledgeBaseMapper,
+                                     KbEmbeddingProfileProvider embeddingProfileProvider,
                                      Executor innerRetrievalExecutor) {
         this.properties = properties;
-        this.knowledgeBaseMapper = knowledgeBaseMapper;
+        this.embeddingProfileProvider = embeddingProfileProvider;
         this.parallelRetriever = new CollectionParallelRetriever(retrieverService, innerRetrievalExecutor);
     }
 
@@ -157,24 +153,12 @@ public class VectorGlobalSearchChannel implements SearchChannel {
 
     /**
      * 获取所有 KB 类型的 collection
+     * <p>
+     * 复用 {@link KbEmbeddingProfileProvider} 的快照，避免一次检索内重复查库，
+     * 同时保证集合列表与 collection 绑定的嵌入模型来自同一份数据
      */
     private List<String> getAllKBCollections() {
-        Set<String> collections = new HashSet<>();
-
-        // 从知识库表获取全量 collection（全局检索兜底）
-        List<KnowledgeBaseDO> kbList = knowledgeBaseMapper.selectList(
-                Wrappers.lambdaQuery(KnowledgeBaseDO.class)
-                        .select(KnowledgeBaseDO::getCollectionName)
-                        .eq(KnowledgeBaseDO::getDeleted, 0)
-        );
-        for (KnowledgeBaseDO kb : kbList) {
-            String collectionName = kb.getCollectionName();
-            if (collectionName != null && !collectionName.isBlank()) {
-                collections.add(collectionName);
-            }
-        }
-
-        return new ArrayList<>(collections);
+        return new ArrayList<>(embeddingProfileProvider.collections());
     }
 
     /**

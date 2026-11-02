@@ -31,9 +31,11 @@ import com.askflow.knowledge.dao.entity.KnowledgeBaseDO;
 import com.askflow.knowledge.dao.entity.KnowledgeDocumentDO;
 import com.askflow.knowledge.dao.mapper.KnowledgeBaseMapper;
 import com.askflow.knowledge.dao.mapper.KnowledgeDocumentMapper;
+import com.askflow.knowledge.service.support.EmbeddingModelValidator;
 import com.askflow.framework.context.UserContext;
 import com.askflow.framework.exception.ClientException;
 import com.askflow.framework.exception.ServiceException;
+import com.askflow.rag.core.retrieve.KbEmbeddingProfileProvider;
 import com.askflow.rag.core.vector.VectorSpaceId;
 import com.askflow.rag.core.vector.VectorSpaceSpec;
 import com.askflow.rag.core.vector.VectorStoreAdmin;
@@ -62,6 +64,8 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     private final KnowledgeDocumentMapper knowledgeDocumentMapper;
     private final VectorStoreAdmin vectorStoreAdmin;
     private final S3Client s3Client;
+    private final EmbeddingModelValidator embeddingModelValidator;
+    private final KbEmbeddingProfileProvider embeddingProfileProvider;
 
     @Transactional
     @Override
@@ -76,6 +80,9 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         if (count > 0) {
             throw new ServiceException("知识库名称已存在：" + requestParam.getName());
         }
+
+        // 模型在入库与检索两侧都会用到，建库时就确认可用且维度匹配
+        embeddingModelValidator.validate(requestParam.getEmbeddingModel());
 
         KnowledgeBaseDO kbDO = KnowledgeBaseDO.builder()
                 .name(requestParam.getName())
@@ -109,6 +116,9 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                 .build();
         vectorStoreAdmin.ensureVectorSpace(spaceSpec);
 
+        // 新建的知识库必须立刻对检索可见，否则 TTL 窗口内全局检索会漏掉它
+        embeddingProfileProvider.invalidate();
+
         return String.valueOf(kbDO.getId());
     }
 
@@ -132,6 +142,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                 throw new ClientException("知识库已存在向量化文档，不允许修改嵌入模型");
             }
 
+            embeddingModelValidator.validate(requestParam.getEmbeddingModel());
             kb.setEmbeddingModel(requestParam.getEmbeddingModel());
         }
 
@@ -141,6 +152,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
 
         kb.setUpdatedBy(UserContext.getUsername());
         knowledgeBaseMapper.updateById(kb);
+        embeddingProfileProvider.invalidate();
     }
 
     @Override
@@ -193,6 +205,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         kbDO.setDeleted(1);
         kbDO.setUpdatedBy(UserContext.getUsername());
         knowledgeBaseMapper.deleteById(kbDO);
+        embeddingProfileProvider.invalidate();
     }
 
     @Override

@@ -18,7 +18,6 @@
 package com.askflow.rag.core.retrieve;
 
 import com.askflow.framework.convention.RetrievedChunk;
-import com.askflow.infra.embedding.EmbeddingService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -34,11 +33,12 @@ import java.util.List;
 public class PgRetrieverService implements RetrieverService {
 
     private final JdbcTemplate jdbcTemplate;
-    private final EmbeddingService embeddingService;
+    private final QueryEmbeddingService queryEmbeddingService;
 
     @Override
     public List<RetrievedChunk> retrieve(RetrieveRequest request) {
-        List<Float> embedding = embeddingService.embed(request.getQuery());
+        // 按 collection 反查知识库绑定的嵌入模型，确保查询向量与入库向量同源
+        List<Float> embedding = queryEmbeddingService.embed(request.getQuery(), request.getCollectionName());
         float[] vector = normalize(toArray(embedding));
         return retrieveByVector(vector, request);
     }

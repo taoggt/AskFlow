@@ -105,6 +105,13 @@ public class IngestionContext {
     private VectorSpaceId vectorSpaceId;
 
     /**
+     * 嵌入模型标识
+     * 由知识库绑定模型传入，保证入库向量与检索查询向量同源；
+     * 为空时由 ChunkEmbeddingService 回退到全局默认模型
+     */
+    private String embeddingModel;
+
+    /**
      * 当前摄取任务的状态
      */
     private IngestionStatus status;
