@@ -97,6 +97,10 @@ rag:
       lock-seconds: 900
       batch-size: 20
       min-interval-seconds: 60
+      # 执行令牌租约过期后的宽限时间（分钟）
+      processing-lease-grace-minutes: 5
+      # 无执行令牌时的空闲窗口（分钟），需大于 MQ 单次重试最大间隔（2 小时）
+      chunk-retry-window-minutes: 180
 
   mcp:
     servers:

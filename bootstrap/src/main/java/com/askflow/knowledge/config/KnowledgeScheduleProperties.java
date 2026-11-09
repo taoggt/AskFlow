@@ -52,7 +52,17 @@ public class KnowledgeScheduleProperties {
     private Long minIntervalSeconds = 60L;
 
     /**
-     * RUNNING 状态超时阈值（分钟），超过此时间未完成的文档重置为 FAILED
+     * 执行令牌租约过期后的宽限时间（分钟）
+     * <p>租约过期说明消费者可能已经失联（进程崩溃、被 kill），但为了避免把
+     * "刚好在写回"的消费者误判为失败，需要再等一段时间才回收。
      */
-    private Long runningTimeoutMinutes = 30L;
+    private Long processingLeaseGraceMinutes = 5L;
+
+    /**
+     * 无执行令牌时的空闲窗口（分钟）
+     * <p>文档处于 RUNNING 但没有任何消费者持有令牌，说明消息丢失或重试已耗尽进入死信队列。
+     * 该值以"最后一次尝试结束（释放令牌）"为起点计时，因此只需大于 RocketMQ 单次重试的
+     * 最大间隔（默认 2 小时，即第 16 次重试）并留出余量，否则会在重试等待期间把任务误判为失败。
+     */
+    private Long chunkRetryWindowMinutes = 180L;
 }

@@ -17,6 +17,7 @@
 
 package com.askflow.knowledge.mq;
 
+import cn.hutool.core.util.StrUtil;
 import com.askflow.framework.context.LoginUser;
 import com.askflow.framework.context.UserContext;
 import com.askflow.framework.mq.MessageWrapper;
@@ -27,6 +28,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.springframework.stereotype.Component;
+
+import java.util.UUID;
 
 /**
  * 文档分块任务 MQ 消费者
@@ -47,11 +50,27 @@ public class KnowledgeDocumentChunkConsumer implements RocketMQListener<MessageW
     public void onMessage(MessageWrapper<KnowledgeDocumentChunkEvent> message) {
         KnowledgeDocumentChunkEvent event = message.getBody();
 
-        log.info("[消费者] 开始消费文档分块任务，docId={}, keys={}", event.getDocId(), message.getKeys());
+        // 升级前在途的历史消息没有 taskId，无法与文档当前任务匹配，直接丢弃
+        if (StrUtil.isBlank(event.getTaskId())) {
+            log.warn("[消费者] 消息缺少 taskId，跳过, docId={}, keys={}", event.getDocId(), message.getKeys());
+            return;
+        }
+
+        String token = UUID.randomUUID().toString();
+        log.info("[消费者] 开始消费文档分块任务，docId={}, taskId={}, token={}, keys={}",
+                event.getDocId(), event.getTaskId(), token, message.getKeys());
+
+        // 先原子领取执行权：领取成功才说明这条消息对应的任务仍然有效、且当前没有其他消费者在跑
+        boolean claimed = documentService.claimChunkTask(event.getDocId(), event.getTaskId(), token);
+        if (!claimed) {
+            // 领取失败不一定是"该丢弃"：可能是同类任务正在被其他消费者执行，需要延迟重试
+            documentService.handleUnclaimedMessage(event);
+            return;
+        }
 
         UserContext.set(LoginUser.builder().username(event.getOperator()).build());
         try {
-            documentService.executeChunk(event.getDocId());
+            documentService.executeChunk(event.getDocId(), event.getTaskId(), token);
         } finally {
             UserContext.clear();
         }

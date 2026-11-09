@@ -19,6 +19,7 @@ package com.askflow.knowledge.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.collection.CollUtil;
+import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -39,6 +40,7 @@ import com.askflow.core.parser.DocumentParserSelector;
 import com.askflow.core.parser.ParserType;
 import com.askflow.framework.context.UserContext;
 import com.askflow.framework.exception.ClientException;
+import com.askflow.framework.exception.RemoteException;
 import com.askflow.framework.mq.producer.MessageQueueProducer;
 import com.askflow.ingestion.dao.entity.IngestionPipelineDO;
 import com.askflow.ingestion.dao.mapper.IngestionPipelineMapper;
@@ -66,6 +68,8 @@ import com.askflow.knowledge.dao.mapper.KnowledgeDocumentMapper;
 import com.askflow.knowledge.enums.DocumentStatus;
 import com.askflow.knowledge.enums.ProcessMode;
 import com.askflow.knowledge.enums.SourceType;
+import com.askflow.knowledge.exception.ChunkTaskFencedException;
+import com.askflow.knowledge.exception.KnowledgeChunkRetryableException;
 import com.askflow.knowledge.handler.RemoteFileFetcher;
 import com.askflow.knowledge.mq.event.KnowledgeDocumentChunkEvent;
 import com.askflow.knowledge.schedule.CronScheduleHelper;
@@ -79,20 +83,31 @@ import com.askflow.rag.service.FileStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.net.ConnectException;
+import java.net.SocketException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -123,6 +138,19 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
     @Value("knowledge-document-chunk_topic${unique-name:}")
     private String chunkTopic;
 
+    /**
+     * 执行令牌的租约时长（分钟）
+     * <p>超过该时长未释放，视为消费者已失联，允许其他消费者抢占该任务。
+     * <p>注意：该值需要大于 RocketMQ 的消费超时（默认 15 分钟），
+     * 否则正常执行中的任务会被重投的消息抢走。
+     */
+    private static final int CHUNK_TASK_LEASE_MINUTES = 30;
+
+    /**
+     * 文档内容哈希算法，与定时刷新链路的 SHA-256 口径保持一致
+     */
+    private static final String CONTENT_HASH_ALGORITHM = "SHA-256";
+
     @Override
     public KnowledgeDocumentVO upload(String kbId, KnowledgeDocumentUploadRequest requestParam, MultipartFile file) {
         KnowledgeBaseDO kbDO = knowledgeBaseMapper.selectById(kbId);
@@ -130,6 +158,9 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
 
         SourceType sourceType = SourceType.normalize(requestParam.getSourceType());
         validateSourceAndSchedule(sourceType, requestParam);
+        // 先算内容哈希并做同库去重，重复文件不必再走一遍对象存储
+        String contentHash = SourceType.FILE == sourceType ? resolveFileContentHash(file) : null;
+        assertContentNotDuplicated(kbId, contentHash);
         StoredFileDTO stored = resolveStoredFile(kbDO.getCollectionName(), sourceType, requestParam.getSourceLocation(), file);
         ProcessModeConfig modeConfig = resolveProcessModeConfig(requestParam);
 
@@ -141,6 +172,7 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                 .fileUrl(stored.getUrl())
                 .fileType(stored.getDetectedType())
                 .fileSize(stored.getSize())
+                .contentHash(contentHash)
                 .status(DocumentStatus.PENDING.getCode())
                 .sourceType(sourceType.getValue())
                 .sourceLocation(SourceType.URL == sourceType ? StrUtil.trimToNull(requestParam.getSourceLocation()) : null)
@@ -153,67 +185,209 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                 .createdBy(UserContext.getUsername())
                 .updatedBy(UserContext.getUsername())
                 .build();
-        documentMapper.insert(documentDO);
+        try {
+            documentMapper.insert(documentDO);
+        } catch (DuplicateKeyException e) {
+            // 并发上传同一文件时由唯一索引兜底：本次已落盘的对象要回收，避免留下孤儿文件
+            deleteStoredFileQuietly(documentDO);
+            throw new ClientException("该文件已存在于当前知识库，请勿重复上传");
+        }
 
         return BeanUtil.toBean(documentDO, KnowledgeDocumentVO.class);
     }
 
     @Override
     public void startChunk(String docId) {
+        KnowledgeDocumentDO document = documentMapper.selectById(docId);
+        Assert.notNull(document, () -> new ClientException("文档不存在"));
+
+        // 每次触发都生成新的任务 ID：消费端凭它判断消息是否仍然有效，
+        // 上一个任务遗留的消息（未消费、重投、积压）会因为任务 ID 不匹配而被跳过
+        String taskId = UUID.randomUUID().toString();
         KnowledgeDocumentChunkEvent event = KnowledgeDocumentChunkEvent.builder()
+                .taskId(taskId)
                 .docId(docId)
+                .kbId(document.getKbId())
                 .operator(UserContext.getUsername())
                 .build();
 
         messageQueueProducer.sendInTransaction(
                 chunkTopic,
-                docId,
+                taskId,
                 "文档分块",
                 event,
                 arg -> {
                     int updated = documentMapper.update(
                             new LambdaUpdateWrapper<KnowledgeDocumentDO>()
                                     .set(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+                                    .set(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
                                     .set(KnowledgeDocumentDO::getUpdatedBy, event.getOperator())
+                                    // 新任务开始即作废旧任务持有的执行令牌
+                                    .set(KnowledgeDocumentDO::getProcessingToken, null)
+                                    .set(KnowledgeDocumentDO::getProcessingLeaseUntil, null)
+                                    // update_time 是补偿任务判断"多久没人动过"的依据，必须显式维护
+                                    .set(KnowledgeDocumentDO::getUpdateTime, new Date())
                                     .eq(KnowledgeDocumentDO::getId, docId)
                                     .ne(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
                     );
                     if (updated == 0) {
-                        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
-                        Assert.notNull(documentDO, () -> new ClientException("文档不存在"));
                         throw new ClientException("文档分块操作正在进行中，请稍后再试");
                     }
-                    KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
-                    event.setKbId(documentDO.getKbId());
-                    scheduleService.upsertSchedule(documentDO);
+                    scheduleService.upsertSchedule(document);
                 }
         );
     }
 
     @Override
-    public void executeChunk(String docId) {
-        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
-        if (documentDO == null) {
-            log.warn("文档不存在，跳过分块任务, docId={}", docId);
+    public boolean claimChunkTask(String docId, String taskId, String token) {
+        Date now = new Date();
+        Date leaseUntil = DateUtil.offsetMinute(now, CHUNK_TASK_LEASE_MINUTES);
+        // 一条 UPDATE 完成"校验 + 抢占"，由数据库保证并发安全：
+        // 任务 ID、状态、令牌归属任一不满足都不会命中，因此不会出现两个消费者同时领取成功
+        int updated = documentMapper.update(
+                new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                        .set(KnowledgeDocumentDO::getProcessingToken, token)
+                        .set(KnowledgeDocumentDO::getProcessingLeaseUntil, leaseUntil)
+                        .set(KnowledgeDocumentDO::getUpdateTime, now)
+                        .eq(KnowledgeDocumentDO::getId, docId)
+                        .eq(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                        .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+                        // 无人持有，或原持有者租约已过期（失联）时才允许领取
+                        .and(wrapper -> wrapper
+                                .isNull(KnowledgeDocumentDO::getProcessingToken)
+                                .or()
+                                .isNull(KnowledgeDocumentDO::getProcessingLeaseUntil)
+                                .or()
+                                .le(KnowledgeDocumentDO::getProcessingLeaseUntil, now))
+        );
+        if (updated > 0) {
+            log.info("[分块任务] 领取执行权成功, docId={}, taskId={}, token={}, leaseUntil={}",
+                    docId, taskId, token, leaseUntil);
+        }
+        return updated > 0;
+    }
+
+    @Override
+    public void releaseChunkTask(String docId, String taskId, String token) {
+        transactionOperations.executeWithoutResult(status -> {
+            int updated = documentMapper.update(
+                    new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                            .set(KnowledgeDocumentDO::getProcessingToken, null)
+                            .set(KnowledgeDocumentDO::getProcessingLeaseUntil, null)
+                            .set(KnowledgeDocumentDO::getUpdateTime, new Date())
+                            .eq(KnowledgeDocumentDO::getId, docId)
+                            .eq(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                            // 只允许令牌持有者释放，避免误清新消费者的令牌
+                            .eq(KnowledgeDocumentDO::getProcessingToken, token)
+                            .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+            );
+            if (updated > 0) {
+                log.info("[分块任务] 释放执行权, docId={}, taskId={}, token={}", docId, taskId, token);
+            } else {
+                log.warn("[分块任务] 释放执行权未命中，令牌可能已被接管, docId={}, taskId={}, token={}",
+                        docId, taskId, token);
+            }
+        });
+    }
+
+    @Override
+    public void handleUnclaimedMessage(KnowledgeDocumentChunkEvent event) {
+        String docId = event.getDocId();
+        String taskId = event.getTaskId();
+        KnowledgeDocumentDO document = documentMapper.selectById(docId);
+
+        // 1. 文档不存在（已删除）：消息没有任何意义，直接跳过（ACK）
+        if (document == null) {
+            log.warn("[分块任务] 文档不存在，丢弃消息, docId={}, taskId={}", docId, taskId);
             return;
         }
 
-        runChunkTask(documentDO);
+        // 2. 不是当前有效任务：旧任务遗留消息，跳过（ACK）
+        if (!Objects.equals(taskId, document.getCurrentChunkTaskId())) {
+            log.info("[分块任务] 非当前有效任务，跳过消息, docId={}, taskId={}, currentTaskId={}",
+                    docId, taskId, document.getCurrentChunkTaskId());
+            return;
+        }
+
+        // 3. 任务已结束（成功/失败）：重复投递的消息，跳过（ACK）
+        if (!DocumentStatus.RUNNING.getCode().equals(document.getStatus())) {
+            log.info("[分块任务] 任务已结束，跳过消息, docId={}, taskId={}, status={}",
+                    docId, taskId, document.getStatus());
+            return;
+        }
+
+        // 4. 任务仍是当前任务且处于运行中，说明另一个消费者正持有有效令牌；
+        //    这里不能 ACK，必须抛异常让 MQ 延迟重投，否则任务会永远停在 RUNNING
+        Date leaseUntil = document.getProcessingLeaseUntil();
+        if (StrUtil.isNotBlank(document.getProcessingToken())
+                && leaseUntil != null && leaseUntil.after(new Date())) {
+            log.info("[分块任务] 任务正在被其他消费者执行，延迟重试, docId={}, taskId={}, leaseUntil={}",
+                    docId, taskId, leaseUntil);
+            throw new KnowledgeChunkRetryableException(
+                    "文档分块任务正在被其他消费者执行，稍后重试, docId=" + docId + ", taskId=" + taskId);
+        }
+
+        // 5. 令牌已释放或租约已过期但状态仍是 RUNNING：交给 MQ 重投，下一次投递即可重新领取执行
+        log.info("[分块任务] 执行令牌已失效但任务未完成，延迟重试, docId={}, taskId={}, token={}, leaseUntil={}",
+                docId, taskId, document.getProcessingToken(), leaseUntil);
+        throw new KnowledgeChunkRetryableException(
+                "文档分块任务令牌已失效，等待重新领取, docId=" + docId + ", taskId=" + taskId);
     }
 
-    private void runChunkTask(KnowledgeDocumentDO documentDO) {
+    @Override
+    public void executeChunk(String docId, String taskId, String token) {
+        KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
+        if (documentDO == null) {
+            log.warn("文档不存在，跳过分块任务, docId={}, taskId={}", docId, taskId);
+            return;
+        }
+        if (!taskId.equals(documentDO.getCurrentChunkTaskId())) {
+            log.warn("任务已过期，跳过：{}", taskId);
+            return;
+        }
+        runChunkTask(documentDO, taskId, token, true);
+    }
+
+    /**
+     * 执行一次分块任务
+     * <p>失败按「可重试 / 终态」两类处理：
+     * <ul>
+     *   <li>可重试（网络抖动、下游限流、数据库连接异常等）：写失败日志 → 释放执行令牌 →
+     *       抛出 {@link KnowledgeChunkRetryableException}，交给 MQ 重新投递；</li>
+     *   <li>终态（文件解析失败、Pipeline 配置缺失、参数非法等）：写失败日志 → 按
+     *       taskId + token 做 fencing 后把文档置为 failed。</li>
+     * </ul>
+     * <p>另外，写回成功状态时同样带 taskId + token 条件，租约过期后被接管执行的旧消费者
+     * 会命中 0 行并整体回滚，不会覆盖新任务的结果。
+     *
+     * @param throwOnRetryable MQ 消费链路传 true（抛出让 MQ 重投）；
+     *                         定时刷新链路传 false（直接置为失败，由下一次 cron 触发重试）
+     */
+    private void runChunkTask(KnowledgeDocumentDO documentDO, String taskId, String token, boolean throwOnRetryable) {
         String docId = documentDO.getId();
         ProcessMode processMode = ProcessMode.normalize(documentDO.getProcessMode());
 
-        KnowledgeDocumentChunkLogDO chunkLog = KnowledgeDocumentChunkLogDO.builder()
-                .docId(docId)
-                .status(DocumentStatus.RUNNING.getCode())
-                .processMode(processMode.getValue())
-                .chunkStrategy(documentDO.getChunkStrategy())
-                .pipelineId(documentDO.getPipelineId())
-                .startTime(new Date())
-                .build();
-        chunkLogMapper.insert(chunkLog);
+        KnowledgeDocumentChunkLogDO chunkLog;
+        try {
+            chunkLog = KnowledgeDocumentChunkLogDO.builder()
+                    .docId(docId)
+                    .status(DocumentStatus.RUNNING.getCode())
+                    .processMode(processMode.getValue())
+                    .chunkStrategy(documentDO.getChunkStrategy())
+                    .pipelineId(documentDO.getPipelineId())
+                    .startTime(new Date())
+                    .build();
+            chunkLogMapper.insert(chunkLog);
+        } catch (Exception e) {
+            // 写日志都失败，基本可以判定是数据库不可用，属于可重试失败
+            log.error("写入分块日志失败：docId={}, taskId={}", docId, taskId, e);
+            if (throwOnRetryable) {
+                releaseChunkTask(docId, taskId, token);
+                throw new KnowledgeChunkRetryableException("写入分块日志失败, docId=" + docId, e);
+            }
+            markChunkFailed(docId, taskId, token);
+            return;
+        }
 
         long totalStartTime = System.currentTimeMillis();
         long extractDuration = 0;
@@ -235,24 +409,75 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
                 chunkResults = result.chunks();
             }
 
-            long persistStart = System.currentTimeMillis();
             String collectionName = resolveCollectionName(documentDO.getKbId());
-            int savedCount = persistChunksAndVectorsAtomically(collectionName, docId, chunkResults);
+            // 提取 + 分块 + 嵌入可能耗时很久，进入持久化前续租一次，
+            // 避免补偿任务把"仍在执行"的任务误判成"执行者失联"
+            renewChunkTaskLease(docId, taskId, token);
+            long persistStart = System.currentTimeMillis();
+            int savedCount = persistChunksAndVectorsAtomically(collectionName, docId, taskId, token, chunkResults);
             persistDuration = System.currentTimeMillis() - persistStart;
 
             long totalDuration = System.currentTimeMillis() - totalStartTime;
             updateChunkLog(chunkLog.getId(), DocumentStatus.SUCCESS.getCode(), savedCount,
                     extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration, null);
-        } catch (Exception e) {
-            log.error("文档分块任务执行失败：docId={}", docId, e);
-            markChunkFailed(documentDO.getId());
+        } catch (ChunkTaskFencedException e) {
+            // 执行权已被更晚的消费者/任务接管：不写文档状态，直接丢弃本次结果（ACK）
+            log.warn("分块结果写回时发现执行权已失效，丢弃本次结果：docId={}, taskId={}, token={}",
+                    docId, taskId, token);
             long totalDuration = System.currentTimeMillis() - totalStartTime;
             updateChunkLog(chunkLog.getId(), DocumentStatus.FAILED.getCode(), 0,
-                    extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration, e.getMessage());
+                    extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration,
+                    "执行权已失效（任务被接管），本次结果作废");
+        } catch (Exception e) {
+            boolean retryable = isRetryable(e);
+            log.error("文档分块任务执行失败：docId={}, taskId={}, retryable={}", docId, taskId, retryable, e);
+
+            long totalDuration = System.currentTimeMillis() - totalStartTime;
+
+            if (retryable && throwOnRetryable) {
+                // 先释放令牌，保证重投的消息能重新领取；文档保持 running，重试可以继续
+                releaseChunkTask(docId, taskId, token);
+                updateChunkLog(chunkLog.getId(), DocumentStatus.FAILED.getCode(), 0,
+                        extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration,
+                        "可重试失败，等待 MQ 重投：" + e.getMessage());
+                throw new KnowledgeChunkRetryableException(
+                        "文档分块任务执行失败，等待重试, docId=" + docId, e);
+            }
+
+            // 终态失败：文档置为 failed 并清理令牌
+            updateChunkLog(chunkLog.getId(), DocumentStatus.FAILED.getCode(), 0,
+                    extractDuration, chunkDuration, embedDuration, persistDuration, totalDuration,
+                    e.getMessage());
+            markChunkFailed(docId, taskId, token);
         }
     }
 
-    private int persistChunksAndVectorsAtomically(String collectionName, String docId, List<VectorChunk> chunkResults) {
+    /**
+     * 续租执行令牌
+     * <p>仅在阶段边界调用（当前是"进入持久化之前"），用于覆盖耗时的提取/嵌入阶段。
+     * 续租失败说明执行权已被更晚的消费者接管，直接抛 {@link ChunkTaskFencedException}
+     * 放弃本次结果，避免白做一次持久化。
+     */
+    private void renewChunkTaskLease(String docId, String taskId, String token) {
+        Date now = new Date();
+        int updated = documentMapper.update(
+                new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                        .set(KnowledgeDocumentDO::getProcessingLeaseUntil,
+                                DateUtil.offsetMinute(now, CHUNK_TASK_LEASE_MINUTES))
+                        .set(KnowledgeDocumentDO::getUpdateTime, now)
+                        .eq(KnowledgeDocumentDO::getId, docId)
+                        .eq(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                        .eq(KnowledgeDocumentDO::getProcessingToken, token)
+                        .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+        );
+        if (updated == 0) {
+            throw new ChunkTaskFencedException(
+                    "续租失败，执行权已被接管, docId=" + docId + ", taskId=" + taskId);
+        }
+    }
+
+    private int persistChunksAndVectorsAtomically(String collectionName, String docId, String taskId,
+                                                  String token, List<VectorChunk> chunkResults) {
         List<KnowledgeChunkCreateRequest> chunks = chunkResults.stream()
                 .map(vc -> {
                     KnowledgeChunkCreateRequest req = new KnowledgeChunkCreateRequest();
@@ -267,15 +492,56 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             knowledgeChunkService.batchCreate(docId, chunks);
             vectorStoreService.deleteDocumentVectors(collectionName, docId);
             vectorStoreService.indexDocumentChunks(collectionName, docId, chunkResults);
-            KnowledgeDocumentDO updateDocumentDO = KnowledgeDocumentDO.builder()
-                    .id(docId)
-                    .chunkCount(chunks.size())
-                    .status(DocumentStatus.SUCCESS.getCode())
-                    .updatedBy(UserContext.getUsername())
-                    .build();
-            documentMapper.updateById(updateDocumentDO);
+
+            // fencing 写回：只有仍持有当前任务令牌的消费者才能把文档置为成功。
+            // 租约过期后被接管执行的旧消费者会命中 0 行，从而整体回滚，不覆盖新结果
+            int updated = documentMapper.update(
+                    new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                            .set(KnowledgeDocumentDO::getChunkCount, chunks.size())
+                            .set(KnowledgeDocumentDO::getStatus, DocumentStatus.SUCCESS.getCode())
+                            .set(KnowledgeDocumentDO::getUpdatedBy, UserContext.getUsername())
+                            .set(KnowledgeDocumentDO::getProcessingToken, null)
+                            .set(KnowledgeDocumentDO::getProcessingLeaseUntil, null)
+                            .set(KnowledgeDocumentDO::getUpdateTime, new Date())
+                            .eq(KnowledgeDocumentDO::getId, docId)
+                            .eq(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                            .eq(KnowledgeDocumentDO::getProcessingToken, token)
+                            .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+            );
+            if (updated == 0) {
+                throw new ChunkTaskFencedException(
+                        "任务执行权已失效, docId=" + docId + ", taskId=" + taskId);
+            }
         });
         return chunks.size();
+    }
+
+    /**
+     * 判断异常是否属于「可重试」的临时性故障
+     * <p>会沿 cause 链逐层判断：命中 ClientException / IllegalArgumentException 等参数类
+     * 异常直接判定为不可重试；命中 IO、超时、连接、数据库访问、远程调用等异常判定为可重试。
+     */
+    private boolean isRetryable(Throwable throwable) {
+        for (Throwable current = throwable; current != null; current = current.getCause()) {
+            if (current instanceof ChunkTaskFencedException) {
+                return false;
+            }
+            if (current instanceof ClientException || current instanceof IllegalArgumentException) {
+                return false;
+            }
+            if (current instanceof DataAccessException
+                    || current instanceof RemoteException
+                    || current instanceof IOException
+                    || current instanceof TimeoutException
+                    || current instanceof ConnectException
+                    || current instanceof SocketException) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+        }
+        return false;
     }
 
     private void updateChunkLog(String logId, String status, int chunkCount, long extractDuration,
@@ -384,20 +650,69 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
         return chunks;
     }
 
+    /**
+     * 定时刷新链路直接执行分块
+     * <p>该链路已经通过调度表租约（lock_owner / lock_until）保证同一时刻只有一个调度在跑，
+     * 但分块任务本身也要登记 taskId 并抢占执行令牌，否则同一份文档被"手动触发 + 定时刷新"
+     * 同时命中时，两边都会写分块与向量。抢占失败说明已有消费者在执行，本轮直接跳过。
+     */
     public void chunkDocument(KnowledgeDocumentDO documentDO) {
         if (documentDO == null) {
             return;
         }
-        runChunkTask(documentDO);
+        String docId = documentDO.getId();
+        String taskId = UUID.randomUUID().toString();
+        String token = UUID.randomUUID().toString();
+        Date now = new Date();
+        Date leaseUntil = DateUtil.offsetMinute(now, CHUNK_TASK_LEASE_MINUTES);
+
+        int claimed = documentMapper.update(
+                new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                        .set(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                        .set(KnowledgeDocumentDO::getProcessingToken, token)
+                        .set(KnowledgeDocumentDO::getProcessingLeaseUntil, leaseUntil)
+                        .set(KnowledgeDocumentDO::getUpdateTime, now)
+                        .eq(KnowledgeDocumentDO::getId, docId)
+                        .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+                        .and(wrapper -> wrapper
+                                .isNull(KnowledgeDocumentDO::getProcessingToken)
+                                .or()
+                                .isNull(KnowledgeDocumentDO::getProcessingLeaseUntil)
+                                .or()
+                                .le(KnowledgeDocumentDO::getProcessingLeaseUntil, now))
+        );
+        if (claimed == 0) {
+            log.warn("定时刷新分块任务已有消费者持有执行令牌，跳过本轮, docId={}", docId);
+            return;
+        }
+
+        // 定时刷新链路不抛可重试异常：失败直接置为 failed，由下一次 cron 再触发
+        runChunkTask(documentDO, taskId, token, false);
     }
 
-    private void markChunkFailed(String docId) {
+    /**
+     * 把文档置为终态失败
+     * <p>带 taskId + token 的 fencing 条件：若执行权已被更晚的任务或消费者接管，
+     * 旧消费者无法把状态改成 failed，避免覆盖新任务。
+     */
+    private void markChunkFailed(String docId, String taskId, String token) {
         transactionOperations.executeWithoutResult(status -> {
-            KnowledgeDocumentDO update = new KnowledgeDocumentDO();
-            update.setId(docId);
-            update.setStatus(DocumentStatus.FAILED.getCode());
-            update.setUpdatedBy(UserContext.getUsername());
-            documentMapper.updateById(update);
+            int updated = documentMapper.update(
+                    new LambdaUpdateWrapper<KnowledgeDocumentDO>()
+                            .set(KnowledgeDocumentDO::getStatus, DocumentStatus.FAILED.getCode())
+                            .set(KnowledgeDocumentDO::getUpdatedBy, UserContext.getUsername())
+                            .set(KnowledgeDocumentDO::getProcessingToken, null)
+                            .set(KnowledgeDocumentDO::getProcessingLeaseUntil, null)
+                            .set(KnowledgeDocumentDO::getUpdateTime, new Date())
+                            .eq(KnowledgeDocumentDO::getId, docId)
+                            .eq(KnowledgeDocumentDO::getCurrentChunkTaskId, taskId)
+                            .eq(KnowledgeDocumentDO::getProcessingToken, token)
+                            .eq(KnowledgeDocumentDO::getStatus, DocumentStatus.RUNNING.getCode())
+            );
+            if (updated == 0) {
+                log.warn("标记文档分块失败时未命中，执行权可能已被接管, docId={}, taskId={}, token={}",
+                        docId, taskId, token);
+            }
         });
     }
 
@@ -778,6 +1093,53 @@ public class KnowledgeDocumentServiceImpl implements KnowledgeDocumentService {
             return fileStorageService.upload(bucketName, file);
         }
         return remoteFileFetcher.fetchAndStore(bucketName, sourceLocation);
+    }
+
+    /**
+     * 计算上传文件的内容哈希（SHA-256 十六进制）
+     * <p>MultipartFile#getInputStream 每次调用都会从底层临时文件重新打开流，
+     * 因此这里先完整读一遍算哈希、再由 {@link #resolveStoredFile} 另开流上传，两者互不影响。
+     * <p>读取失败时不做兜底：宁可让上传失败，也不能让文档以空哈希入库而跳过后续去重。
+     */
+    private String resolveFileContentHash(MultipartFile file) {
+        Assert.notNull(file, () -> new ClientException("上传文件不能为空"));
+        Assert.isFalse(file.isEmpty(), () -> new ClientException("上传文件不能为空"));
+        try (InputStream in = file.getInputStream()) {
+            MessageDigest digest = MessageDigest.getInstance(CONTENT_HASH_ALGORITHM);
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (IOException e) {
+            throw new ClientException("读取上传文件失败: " + e.getMessage());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("当前 JVM 不支持 " + CONTENT_HASH_ALGORITHM, e);
+        }
+    }
+
+    /**
+     * 同知识库内按内容哈希去重
+     * <p>这里只做一次预检，用来给出明确提示并省掉一次对象存储写入；
+     * 真正的并发保护依赖 uk_kb_doc_content_hash 唯一索引。
+     * <p>去重范围限定在 kb_id 内：同一份文件进入不同知识库是正常用法。
+     */
+    private void assertContentNotDuplicated(String kbId, String contentHash) {
+        if (!StringUtils.hasText(contentHash)) {
+            return;
+        }
+        KnowledgeDocumentDO existing = documentMapper.selectOne(
+                Wrappers.lambdaQuery(KnowledgeDocumentDO.class)
+                        .eq(KnowledgeDocumentDO::getKbId, kbId)
+                        .eq(KnowledgeDocumentDO::getContentHash, contentHash)
+                        .last("LIMIT 1")
+        );
+        if (existing != null) {
+            throw new ClientException(String.format(
+                    "该文件已存在于当前知识库：%s（状态 %s），请勿重复上传",
+                    existing.getDocName(), existing.getStatus()));
+        }
     }
 
     private ChunkingOptions buildChunkingOptions(ChunkingMode mode, KnowledgeDocumentDO documentDO) {

@@ -47,16 +47,23 @@ public class KnowledgeDocumentScheduleJob {
     private final DocumentStatusHelper documentStatusHelper;
 
     /**
-     * 恢复长时间卡在 RUNNING 状态的文档（进程崩溃等异常场景）
-     * 超过配置阈值未完成的 RUNNING 文档重置为 FAILED，允许用户手动重试
+     * 回收「没有任何执行者」的 RUNNING 文档（补偿任务 / watchdog）
+     * <p>覆盖三种卡死来源：消费者失联（租约过期）、消息丢失、可重试异常重试耗尽进入死信队列。
+     * 超过阈值仍无执行者的文档重置为 FAILED，允许用户重新触发。
+     * <p>判定依赖 {@code processing_token / processing_lease_until / update_time}，
+     * 正在执行、正在等待 MQ 重投的任务都不会被误判。
      */
     @Scheduled(fixedDelay = 60_000, initialDelay = 30_000)
     public void recoverStuckRunningDocuments() {
-        long timeoutMinutes = scheduleProperties.getRunningTimeoutMinutes();
-        int recovered = documentStatusHelper.recoverStuckRunning(timeoutMinutes);
+        long leaseGraceMinutes = scheduleProperties.getProcessingLeaseGraceMinutes();
+        long retryWindowMinutes = scheduleProperties.getChunkRetryWindowMinutes();
+        int recovered = documentStatusHelper.recoverStuckRunning(
+                leaseGraceMinutes,
+                retryWindowMinutes,
+                scheduleProperties.getBatchSize());
         if (recovered > 0) {
-            log.warn("恢复了 {} 个卡在 RUNNING 状态超过 {} 分钟的文档，已重置为 FAILED",
-                    recovered, Math.max(timeoutMinutes, 10));
+            log.warn("回收了 {} 个没有执行者的 RUNNING 文档，已重置为 FAILED（租约宽限 {} 分钟，无令牌窗口 {} 分钟）",
+                    recovered, leaseGraceMinutes, retryWindowMinutes);
         }
     }
 

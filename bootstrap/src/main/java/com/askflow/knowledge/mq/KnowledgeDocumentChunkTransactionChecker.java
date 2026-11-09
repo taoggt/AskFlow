@@ -60,7 +60,19 @@ public class KnowledgeDocumentChunkTransactionChecker implements TransactionChec
         String docId = event.getDocId();
         KnowledgeDocumentDO documentDO = documentMapper.selectById(docId);
 
-        return documentDO != null
-                && DocumentStatus.RUNNING.getCode().equals(documentDO.getStatus());
+        // 除了文档处于 running，还要求任务 ID 与文档当前任务一致：
+        // 否则说明本地事务对应的已经是过期任务，消息应当回滚而不是提交
+        boolean committed = documentDO != null
+                && DocumentStatus.RUNNING.getCode().equals(documentDO.getStatus())
+                && event.getTaskId() != null
+                && event.getTaskId().equals(documentDO.getCurrentChunkTaskId());
+        if (!committed) {
+            log.warn("[事务回查] 文档状态与任务不匹配，判定回滚, docId={}, taskId={}, status={}, currentTaskId={}",
+                    docId,
+                    event.getTaskId(),
+                    documentDO != null ? documentDO.getStatus() : null,
+                    documentDO != null ? documentDO.getCurrentChunkTaskId() : null);
+        }
+        return committed;
     }
 }

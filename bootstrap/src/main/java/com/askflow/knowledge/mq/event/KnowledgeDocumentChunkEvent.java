@@ -38,6 +38,14 @@ public class KnowledgeDocumentChunkEvent implements Serializable {
     private static final long serialVersionUID = 1L;
 
     /**
+     * 文档处理任务 ID
+     * <p>每次触发分块都会生成新的任务 ID，消费端必须凭它与文档当前有效的
+     * {@code t_knowledge_document.current_chunk_task_id} 匹配后才能执行，
+     * 从而让旧消息（上一个任务）天然失效。
+     */
+    private String taskId;
+
+    /**
      * 文档 ID
      */
     private String docId;

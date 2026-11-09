@@ -99,6 +99,12 @@ public class KnowledgeDocumentDO {
     private Long fileSize;
 
     /**
+     * 文件内容 SHA-256 十六进制
+     * <p>用于同一知识库内的文件去重；远程 URL 文档与历史数据为空。
+     */
+    private String contentHash;
+
+    /**
      * 处理模式：chunk / pipeline
      * - chunk: 使用分块策略直接分块
      * - pipeline: 使用数据通道进行清洗处理
@@ -132,6 +138,25 @@ public class KnowledgeDocumentDO {
      * - success：向量化完成
      */
     private String status;
+
+    /**
+     * 当前有效的文档处理任务 ID
+     * <p>每次触发分块都会覆盖为新的任务 ID，旧任务的回写将被乐观条件拦截。
+     */
+    private String currentChunkTaskId;
+
+    /**
+     * 当前消费者持有的执行令牌
+     * <p>为空表示没有消费者在执行；与 {@link #currentChunkTaskId} 一起构成
+     * 执行权的 fencing token，避免租约过期后的旧消费者覆盖新消费者的结果。
+     */
+    private String processingToken;
+
+    /**
+     * 当前执行令牌的有效期
+     * <p>超过该时间视为消费者已失联，允许其他消费者抢占。
+     */
+    private Date processingLeaseUntil;
 
     /**
      * 创建人

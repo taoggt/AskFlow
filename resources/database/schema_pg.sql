@@ -137,6 +137,7 @@ CREATE TABLE t_knowledge_document (
     file_url         VARCHAR(1024) NOT NULL,
     file_type        VARCHAR(16)   NOT NULL,
     file_size        BIGINT,
+    content_hash     VARCHAR(64),
     process_mode     VARCHAR(16)   DEFAULT 'chunk',
     status           VARCHAR(16)   NOT NULL DEFAULT 'pending',
     source_type      VARCHAR(16),
@@ -146,6 +147,9 @@ CREATE TABLE t_knowledge_document (
     chunk_strategy   VARCHAR(32),
     chunk_config     JSONB,
     pipeline_id      VARCHAR(20),
+    current_chunk_task_id  VARCHAR(64),
+    processing_token       VARCHAR(64),
+    processing_lease_until TIMESTAMP,
     created_by       VARCHAR(20)   NOT NULL,
     updated_by       VARCHAR(20),
     create_time      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -153,7 +157,13 @@ CREATE TABLE t_knowledge_document (
     deleted          SMALLINT      NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_kb_id ON t_knowledge_document (kb_id);
+-- 补偿任务按 status + 租约扫描，用部分索引避免全表扫
+CREATE INDEX idx_doc_running_lease ON t_knowledge_document (processing_lease_until) WHERE status = 'running';
+-- 同一知识库内按文件内容去重：必须是部分唯一索引，逻辑删除的行不参与约束，
+-- 否则文档删除后重新上传同一文件会撞上已逻辑删除的旧行
+CREATE UNIQUE INDEX uk_kb_doc_content_hash ON t_knowledge_document (kb_id, content_hash) WHERE deleted = 0 AND content_hash IS NOT NULL;
 COMMENT ON TABLE t_knowledge_document IS '知识库文档表';
+COMMENT ON COLUMN t_knowledge_document.content_hash IS '文件内容 SHA-256 十六进制，用于同知识库内文件去重；远程 URL 文档与历史数据为空';
 
 CREATE TABLE t_knowledge_chunk (
     id           VARCHAR(20)      NOT NULL PRIMARY KEY,
@@ -510,6 +520,9 @@ COMMENT ON COLUMN t_knowledge_document.schedule_cron IS '定时表达式';
 COMMENT ON COLUMN t_knowledge_document.chunk_strategy IS '分块策略';
 COMMENT ON COLUMN t_knowledge_document.chunk_config IS '分块配置JSON';
 COMMENT ON COLUMN t_knowledge_document.pipeline_id IS 'Pipeline ID';
+COMMENT ON COLUMN t_knowledge_document.current_chunk_task_id IS '当前有效的文档处理任务ID';
+COMMENT ON COLUMN t_knowledge_document.processing_token IS '当前消费者持有的执行令牌';
+COMMENT ON COLUMN t_knowledge_document.processing_lease_until IS '当前执行令牌的有效期';
 COMMENT ON COLUMN t_knowledge_document.created_by IS '创建人';
 COMMENT ON COLUMN t_knowledge_document.updated_by IS '修改人';
 COMMENT ON COLUMN t_knowledge_document.create_time IS '创建时间';
