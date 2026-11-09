@@ -735,3 +735,116 @@ COMMENT ON COLUMN t_ingestion_task_node.output_json IS '节点输出JSON(全量)
 COMMENT ON COLUMN t_ingestion_task_node.create_time IS '创建时间';
 COMMENT ON COLUMN t_ingestion_task_node.update_time IS '更新时间';
 COMMENT ON COLUMN t_ingestion_task_node.deleted IS '是否删除 0：正常 1：删除';
+
+-- ============================================
+-- v1.4 新增：RAG 离线评测
+-- ============================================
+
+-- t_eval_dataset
+CREATE TABLE t_eval_dataset (
+    id           VARCHAR(20)  NOT NULL PRIMARY KEY,
+    name         VARCHAR(128) NOT NULL,
+    description  VARCHAR(512),
+    sample_count INTEGER      NOT NULL DEFAULT 0,
+    created_by   VARCHAR(20)  DEFAULT '',
+    updated_by   VARCHAR(20)  DEFAULT '',
+    create_time  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted      SMALLINT     NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX uk_eval_dataset_name ON t_eval_dataset (name) WHERE deleted = 0;
+COMMENT ON TABLE t_eval_dataset IS '评测集';
+
+-- t_eval_sample
+CREATE TABLE t_eval_sample (
+    id                    VARCHAR(20) NOT NULL PRIMARY KEY,
+    dataset_id            VARCHAR(20) NOT NULL,
+    query_id              VARCHAR(64) NOT NULL,
+    query_text            TEXT        NOT NULL,
+    intent_l1             VARCHAR(64),
+    intent_l2             VARCHAR(128),
+    requires_rag          SMALLINT    NOT NULL DEFAULT 1,
+    expected_doc_ids      JSONB,
+    expected_doc_ids_nice JSONB,
+    ground_truth          TEXT,
+    expected_route        VARCHAR(16) NOT NULL DEFAULT 'KB',
+    sample_order          INTEGER,
+    created_by            VARCHAR(20) DEFAULT '',
+    updated_by            VARCHAR(20) DEFAULT '',
+    create_time           TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time           TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted               SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX uk_eval_sample_query ON t_eval_sample (dataset_id, query_id) WHERE deleted = 0;
+CREATE INDEX idx_eval_sample_dataset ON t_eval_sample (dataset_id, sample_order);
+COMMENT ON TABLE t_eval_sample IS '评测样本';
+COMMENT ON COLUMN t_eval_sample.expected_doc_ids IS '期望召回的文档业务码(must)，必须命中';
+COMMENT ON COLUMN t_eval_sample.expected_doc_ids_nice IS '期望召回的文档业务码(nice)，命中加分';
+COMMENT ON COLUMN t_eval_sample.expected_route IS '期望路由：KB(需要检索) / SYSTEM(不需要检索)';
+
+-- t_eval_run
+CREATE TABLE t_eval_run (
+    id            VARCHAR(20) NOT NULL PRIMARY KEY,
+    dataset_id    VARCHAR(20) NOT NULL,
+    dataset_name  VARCHAR(128),
+    status        VARCHAR(16) NOT NULL DEFAULT 'pending',
+    cancel_flag   SMALLINT    NOT NULL DEFAULT 0,
+    total_count   INTEGER     NOT NULL DEFAULT 0,
+    done_count    INTEGER     NOT NULL DEFAULT 0,
+    failed_count  INTEGER     NOT NULL DEFAULT 0,
+    top_k         INTEGER     NOT NULL DEFAULT 10,
+    judge_enabled SMALLINT    NOT NULL DEFAULT 1,
+    judge_model   VARCHAR(64),
+    metrics_json  JSONB,
+    error_message TEXT,
+    started_at    TIMESTAMP,
+    completed_at  TIMESTAMP,
+    created_by    VARCHAR(20) DEFAULT '',
+    updated_by    VARCHAR(20) DEFAULT '',
+    create_time   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time   TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted       SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_eval_run_dataset ON t_eval_run (dataset_id, create_time DESC);
+CREATE INDEX idx_eval_run_status ON t_eval_run (status);
+COMMENT ON TABLE t_eval_run IS '评测运行';
+COMMENT ON COLUMN t_eval_run.status IS '运行状态：pending / running / success / failed';
+COMMENT ON COLUMN t_eval_run.metrics_json IS '指标聚合结果，运行结束后一次性写入';
+
+-- t_eval_case_result
+CREATE TABLE t_eval_case_result (
+    id                        VARCHAR(20) NOT NULL PRIMARY KEY,
+    run_id                    VARCHAR(20) NOT NULL,
+    query_id                  VARCHAR(64) NOT NULL,
+    query_text                TEXT,
+    ground_truth              TEXT,
+    intent_l1                 VARCHAR(64),
+    intent_l2                 VARCHAR(128),
+    expected_route            VARCHAR(16),
+    requires_rag              SMALLINT,
+    expected_doc_ids          JSONB,
+    retrieved_doc_ids         JSONB,
+    retrieved_context_doc_ids JSONB,
+    retrieved_contexts        JSONB,
+    intent_pred               VARCHAR(128),
+    rewritten_question        TEXT,
+    response                  TEXT,
+    answer_branch             VARCHAR(24),
+    final_status              VARCHAR(16),
+    latency_ms                BIGINT,
+    first_token_ms            BIGINT,
+    scores_json               JSONB,
+    error_message             TEXT,
+    created_by                VARCHAR(20) DEFAULT '',
+    updated_by                VARCHAR(20) DEFAULT '',
+    create_time               TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time               TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted                   SMALLINT    NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX uk_eval_case_result ON t_eval_case_result (run_id, query_id) WHERE deleted = 0;
+CREATE INDEX idx_eval_case_result_run ON t_eval_case_result (run_id);
+COMMENT ON TABLE t_eval_case_result IS '评测样本结果';
+COMMENT ON COLUMN t_eval_case_result.retrieved_doc_ids IS '去重后的文档业务码，保留检索顺序，用于 Hit@K/Recall@K';
+COMMENT ON COLUMN t_eval_case_result.retrieved_context_doc_ids IS '与 retrieved_contexts 等长、保留 null，用于 chunk 级归因';
+COMMENT ON COLUMN t_eval_case_result.answer_branch IS '回答分支：rag / system_only / guidance / empty_retrieval';
+COMMENT ON COLUMN t_eval_case_result.scores_json IS '该样本的指标分与判分原始输出';

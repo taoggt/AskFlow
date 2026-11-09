@@ -142,4 +142,14 @@ public class RAGConstant {
      * 使用 {@code PromptTemplateLoader.renderSection(path, section, slots)} 渲染
      */
     public static final String CONTEXT_FORMAT_PATH = "prompt/context-format.st";
+
+    // ==================== 兜底话术 ====================
+
+    /**
+     * 检索为空时的固定兜底回复
+     * <p>
+     * 生产链路（{@code StreamChatPipeline#handleEmptyRetrieval}）与离线评测的兜底率指标共用，
+     * 评测侧用子串匹配，因此这句话不要随意改动措辞
+     */
+    public static final String NO_DOC_REPLY = "未检索到与问题相关的文档内容。";
 }

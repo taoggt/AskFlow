@@ -214,6 +214,48 @@ public class ThreadPoolExecutorConfig {
     }
 
     /**
+     * 离线评测运行线程池
+     * <p>
+     * 每个运行占用一个线程，队列很短：评测是低频任务，池满时直接拒绝比无限排队更可控
+     */
+    @Bean
+    public Executor evalRunExecutor() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                2,
+                2,
+                60,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(8),
+                ThreadFactoryBuilder.create()
+                        .setNamePrefix("eval_run_executor_")
+                        .build(),
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+        return TtlExecutors.getTtlExecutor(executor);
+    }
+
+    /**
+     * 离线评测样本执行线程池
+     * <p>
+     * 真正的模型并发由 EvalRunEngine 里的信号量控制，这里只负责跑样本任务
+     */
+    @Bean
+    public Executor evalSampleExecutor() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                4,
+                4,
+                60,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(256),
+                ThreadFactoryBuilder.create()
+                        .setNamePrefix("eval_sample_executor_")
+                        .build(),
+                new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+        return TtlExecutors.getTtlExecutor(executor);
+    }
+
+    /**
      * 对话记忆加载线程池（并行加载摘要与历史记录）
      */
     @Bean

@@ -38,6 +38,7 @@ import com.askflow.rag.dto.IntentGroup;
 import com.askflow.rag.dto.RetrievalContext;
 import com.askflow.rag.dto.SubQuestionIntent;
 import com.askflow.rag.config.SearchChannelProperties;
+import com.askflow.rag.constant.RAGConstant;
 import com.askflow.rag.service.handler.StreamTaskManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -162,7 +163,7 @@ public class StreamChatPipeline {
             return false;
         }
         StreamCallback callback = ctx.getCallback();
-        callback.onContent("未检索到与问题相关的文档内容。");
+        callback.onContent(RAGConstant.NO_DOC_REPLY);
         callback.onComplete();
         return true;
     }

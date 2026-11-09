@@ -31,7 +31,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
         "com.askflow.rag.dao.mapper",
         "com.askflow.ingestion.dao.mapper",
         "com.askflow.knowledge.dao.mapper",
-        "com.askflow.user.dao.mapper"
+        "com.askflow.user.dao.mapper",
+        "com.askflow.admin.dao.mapper"
 })
 public class AskFlowApplication {
 

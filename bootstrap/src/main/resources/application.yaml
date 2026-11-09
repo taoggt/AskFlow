@@ -229,4 +229,24 @@ sa-token:
 app:
   demo-mode: false
   eval:
+    # 单条问题的检索证据回放接口 /rag/eval 开关
     enabled: true
+    run:
+      enabled: true
+      # 单次运行最多评测的样本数，防止误提交全量数据集烧掉额度
+      max-samples: 60
+      # 单个运行内部的样本并发度
+      concurrency: 2
+      # 全局同时在跑的样本数上限（跨运行共享）
+      # 必须压着：模型 SSE 读取跑在全局 modelStreamExecutor 上，压高会和线上对话抢线程池
+      max-concurrent-samples: 2
+      sample-timeout-ms: 180000
+      max-attempts: 2
+      store-contexts: true
+    judge:
+      enabled: true
+      # 留空走默认路由；建议指向与被评系统不同的模型，避免同源判分系统性偏高
+      model: ""
+      max-samples: 60
+      max-retries: 1
+      timeout-ms: 120000

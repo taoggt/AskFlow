@@ -7,6 +7,7 @@ import {
   ChevronsRight,
   ClipboardList,
   Database,
+  FlaskConical,
   GitBranch,
   Github,
   Layers,
@@ -128,6 +129,11 @@ const menuGroups: MenuGroup[] = [
         label: "链路追踪",
         icon: Workflow
       },
+      {
+        path: "/admin/eval",
+        label: "效果评测",
+        icon: FlaskConical
+      },
     ]
   },
   {
@@ -159,6 +165,7 @@ const breadcrumbMap: Record<string, string> = {
   "intent-list": "意图列表",
   ingestion: "数据通道",
   traces: "链路追踪",
+  eval: "效果评测",
   "sample-questions": "示例问题",
   mappings: "关键词映射",
   settings: "系统设置",
@@ -308,6 +315,10 @@ export function AdminLayout() {
 
     if (section === "traces" && segments.length > 2) {
       items.push({ label: "链路详情" });
+    }
+
+    if (section === "eval" && segments.length > 2) {
+      items.push({ label: "运行详情" });
     }
 
     return items;
