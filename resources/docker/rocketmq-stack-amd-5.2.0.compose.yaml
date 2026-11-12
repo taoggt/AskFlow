@@ -32,7 +32,11 @@ services:
       - "8082:8082"                              # ← dashboard 端口也从这里暴露
     environment:
       NAMESRV_ADDR: "rmqnamesrv:9876"
-      JAVA_OPT_EXT: "-Xms512m -Xmx512m"
+      # 镜像内置 JDK 8u372 在 cgroup v2 容器里 CgroupV2Subsystem.getInstance() 会 NPE，
+      # 使 RocketMQ StoreUtil 静态初始化失败；之后所有 pull/getMessage 都抛
+      # NoClassDefFoundError（消息能发、永远消费不到，消费位点停在 0）。
+      # 关闭容器指标采集可绕开，堆大小仍由 -Xmx 显式限定，不受影响。
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -XX:-UseContainerSupport"
     depends_on:
       rmqnamesrv:
         condition: service_healthy

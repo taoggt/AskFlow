@@ -808,7 +808,7 @@ CREATE TABLE t_eval_run (
 CREATE INDEX idx_eval_run_dataset ON t_eval_run (dataset_id, create_time DESC);
 CREATE INDEX idx_eval_run_status ON t_eval_run (status);
 COMMENT ON TABLE t_eval_run IS '评测运行';
-COMMENT ON COLUMN t_eval_run.status IS '运行状态：pending / running / success / failed';
+COMMENT ON COLUMN t_eval_run.status IS '运行状态：pending / running / success / failed / cancelled';
 COMMENT ON COLUMN t_eval_run.metrics_json IS '指标聚合结果，运行结束后一次性写入';
 
 -- t_eval_case_result

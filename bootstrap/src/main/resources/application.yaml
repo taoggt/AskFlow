@@ -43,7 +43,9 @@ rocketmq:
   name-server: 127.0.0.1:9876
   producer:
     group: askflow-producer${unique-name:}_pg
-    send-message-timeout: 2000
+    # 同步发送超时（毫秒）：首次发送需拉 topic 路由 + 建连，2000 过紧会偶发
+    # RemotingTooMuchRequestException: sendDefaultImpl call timeout，取 RocketMQ 默认值
+    send-message-timeout: 3000
 
 milvus:
   uri: http://localhost:19530

@@ -64,11 +64,16 @@ import static com.askflow.rag.constant.RAGConstant.CHAT_SYSTEM_PROMPT_PATH;
  * 例如纯系统意图的问题本来就不该检索，不复现就会被算成「该拒未拒」或「过召回」。
  * <p>
  * 这里刻意不复用流式对话的 SSE 链路：评测只要文本和耗时，不需要 emitter、幂等锁和会话落库
+ * <p>
+ * 注意类名不要改回 {@code EvalSampleExecutor}：@Component 的默认 bean 名是类名首字母小写，
+ * 会与 ThreadPoolExecutorConfig 里 {@code @Bean evalSampleExecutor}（评测样本线程池）重名，
+ * 导致启动时 BeanDefinitionOverrideException。本项目里 *Executor 后缀约定留给线程池，
+ * 承载业务逻辑的组件用 *Runner / *Service。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class EvalSampleExecutor {
+public class EvalSampleRunner {
 
     private final QueryRewriteService queryRewriteService;
     private final IntentResolver intentResolver;

@@ -195,7 +195,23 @@ docker run -d --name askflow-redis \
 docker compose -f resources/docker/rocketmq-stack-5.2.0.compose.yaml up -d
 ```
 
-> 在 ARM 机器（如 Apple Silicon）上运行出现镜像架构不匹配时，改用 `rocketmq-stack-amd-5.2.0.compose.yaml`。该文件只是额外固定了 `platform: linux/amd64`，会以模拟方式运行，速度略慢。
+> **ARM64 机器（Apple Silicon / aarch64 服务器）请改用：**
+>
+> ```bash
+> # 1. 注册 amd64 模拟器（裸 Linux 必需；Docker Desktop 已内置）
+> #    推荐 apt 方式：binfmt 注册在重启后由 systemd-binfmt 自动恢复
+> sudo apt update && sudo apt install -y qemu-user-static
+> sudo systemctl restart systemd-binfmt
+> ls /proc/sys/fs/binfmt_misc/ | grep qemu-x86_64        # 应能看到该条目
+> docker run --rm --platform linux/amd64 alpine uname -m # 应输出 x86_64
+>
+> # 2. 启动
+> docker compose -f resources/docker/rocketmq-stack-arm64-5.2.0.compose.yaml up -d
+> ```
+>
+> 也可用 `sudo docker run --privileged --rm tonistiigi/binfmt --install amd64` 一步注册，但该方式写在内核 `binfmt_misc` 里、**重启后失效，需要重新执行**。
+>
+> 该文件给 namesrv/broker 固定了 `platform: linux/amd64`（`apache/rocketmq:5.2.0` 官方只有 amd64 单架构 manifest，只能靠 QEMU 模拟，速度略慢），而 dashboard 不固定平台、直接跑原生 arm64。若 QEMU 未注册，容器会以 `exec format error` 启动失败。`rocketmq-stack-amd-5.2.0.compose.yaml` 则是三个服务全部固定 amd64 的版本。
 
 **对象存储 + Milvus**（同一份 compose 内包含 rustfs，即使不使用 Milvus 也需要 rustfs 来存文档原件）：
 

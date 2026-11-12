@@ -1,0 +1,91 @@
+name: rocketmq-stack
+
+# ARM64 宿主机（如 Ubuntu 24.04 on aarch64 / Apple Silicon）专用编排文件。
+# 说明：
+#   - apache/rocketmq:5.2.0 官方只有 linux/amd64 manifest，故 namesrv/broker 必须固定 amd64，
+#     由宿主机 binfmt + QEMU 模拟执行。启动前请先注册模拟器：
+#       docker run --privileged --rm tonistiigi/binfmt --install amd64
+#       docker run --rm --platform linux/amd64 alpine uname -m   # 应输出 x86_64
+#   - apacherocketmq/rocketmq-dashboard:2.1.0 官方有原生 linux/arm64，
+#     故 dashboard 不固定 platform，直接跑原生镜像，避免多余的模拟开销。
+services:
+  rmqnamesrv:
+    image: apache/rocketmq:5.2.0
+    platform: linux/amd64
+    container_name: rmqnamesrv
+    ports:
+      - "9876:9876"
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx400m"
+    command: sh mqnamesrv
+    networks:
+      - rocketmq
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "grep -q 'The Name Server boot success' /home/rocketmq/logs/rocketmqlogs/namesrv.log || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s                          # ← 模拟环境下 JVM 冷启动较慢，留足预热窗口
+
+  rmqbroker:
+    image: apache/rocketmq:5.2.0
+    platform: linux/amd64
+    container_name: rmqbroker
+    ports:
+      - "10912:10912"
+      - "10911:10911"
+      - "10909:10909"
+      - "8080:8080"
+      - "8081:8081"
+      - "8082:8082"                              # ← dashboard 端口也从这里暴露
+    environment:
+      NAMESRV_ADDR: "rmqnamesrv:9876"
+      # 镜像内置 JDK 8u372 在 cgroup v2 容器里 CgroupV2Subsystem.getInstance() 会 NPE，
+      # 使 RocketMQ StoreUtil 静态初始化失败；之后所有 pull/getMessage 都抛
+      # NoClassDefFoundError（消息能发、永远消费不到，消费位点停在 0）。
+      # 关闭容器指标采集可绕开，堆大小仍由 -Xmx 显式限定，不受影响。
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -XX:-UseContainerSupport"
+    depends_on:
+      rmqnamesrv:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        cat > /home/rocketmq/rocketmq-5.2.0/conf/broker.conf << EOF
+        brokerClusterName = DefaultCluster
+        brokerName = broker-a
+        brokerId = 0
+        deleteWhen = 04
+        fileReservedTime = 48
+        brokerRole = ASYNC_MASTER
+        flushDiskType = ASYNC_FLUSH
+        brokerIP1 = 127.0.0.1
+        timerMaxDelaySec = 31622400
+        EOF
+        sh mqbroker --enable-proxy \
+          -c /home/rocketmq/rocketmq-5.2.0/conf/broker.conf
+    networks:
+      - rocketmq
+    restart: unless-stopped
+
+  dashboard:
+    image: apacherocketmq/rocketmq-dashboard:2.1.0   # ← 原生 arm64，不写 platform
+    container_name: rocketmq-dashboard
+    network_mode: "service:rmqbroker"            # ← 关键：共享 broker 网络栈
+    environment:
+      JAVA_OPTS: >-
+        -Xms256m -Xmx512m
+        -XX:MaxMetaspaceSize=256m
+        -Drocketmq.config.enableDashBoardCollect=false
+        -Drocketmq.namesrv.addr=rmqnamesrv:9876
+        -Dserver.port=8082
+    depends_on:
+      rmqbroker:
+        condition: service_started
+    restart: unless-stopped
+
+networks:
+  rocketmq:
+    driver: bridge

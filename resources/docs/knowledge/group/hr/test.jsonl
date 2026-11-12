@@ -1,0 +1,3 @@
+{"query_id":"HR_LEAVE_001-Q01","query":"年假需要提前多久申请？由谁审批？","intent_l1":"HR-Operations","intent_l2":"HRPolicies-Attendance","requires_rag":true,"expected_doc_ids":["人事制度"],"ground_truth":"年假需提前至少 3 个工作日在系统中提交申请；由直属经理根据项目进度、人员安排及年假余额进行审核，确认不影响业务后批准。","expected_route":"KB"}
+{"query_id":"HR_PAYROLL_003-Q01","query":"每月几号发工资？遇到法定节假日怎么处理？","intent_l1":"benefits","intent_l2":"Salary-BenefitsPolicy","requires_rag":true,"expected_doc_ids":["薪资与福利政策"],"ground_truth":"公司每月固定发薪日为次月 10 日；如遇法定节假日，可能顺延或提前发放，以公司实际通知为准。","expected_route":"KB"}
+{"query_id":"CHAT-001","query":"你好，你能做什么？","intent_l1":"","intent_l2":"","requires_rag":false,"expected_doc_ids":[],"ground_truth":"","expected_route":"SYSTEM"}

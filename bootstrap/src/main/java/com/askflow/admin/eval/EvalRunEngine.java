@@ -48,7 +48,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 评测运行引擎
  * <p>
  * 职责边界：只有编排——建运行上下文、按并发度跑样本、累加进度、汇总指标、收尾。
- * 单条样本怎么跑在 {@link EvalSampleExecutor}，指标怎么算在 {@link EvalMetricCalculator}。
+ * 单条样本怎么跑在 {@link EvalSampleRunner}，指标怎么算在 {@link EvalMetricCalculator}。
  * <p>
  * 不用 MQ：评测是低频任务，没有分片和互斥需求，线程池 + 落表轮询已经够用
  */
@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequiredArgsConstructor
 public class EvalRunEngine {
 
-    private final EvalSampleExecutor sampleExecutor;
+    private final EvalSampleRunner sampleRunner;
     private final EvalMetricCalculator metricCalculator;
     private final EvalRunProperties runProperties;
     private final EvalJudgeProperties judgeProperties;
@@ -169,7 +169,7 @@ public class EvalRunEngine {
             EvalCaseResultDO result = null;
             int attempts = Math.max(1, runProperties.getMaxAttempts());
             for (int attempt = 1; attempt <= attempts; attempt++) {
-                result = sampleExecutor.execute(run, sample, cancellation, judgeAllowed);
+                result = sampleRunner.execute(run, sample, cancellation, judgeAllowed);
                 if (!EvalConstants.FINAL_ERROR.equals(result.getFinalStatus())) {
                     break;
                 }
